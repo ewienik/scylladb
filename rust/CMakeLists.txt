@@ -80,6 +80,23 @@ target_include_directories(wasmtime_bindings
 target_link_libraries(wasmtime_bindings
   INTERFACE Rust::rust_combined)
 
+generate_cxxbridge(quic
+  INPUT quic/src/lib.rs
+  INCLUDE rust/cxx.h
+  OUTPUT_DIR "${binding_gen_build_dir}"
+  SOURCES quic_sources)
+
+add_library(quic STATIC)
+target_sources(quic
+  PRIVATE
+    ${cxx_header}
+    ${quic_sources})
+target_include_directories(quic
+  PUBLIC
+    ${scylla_gen_build_dir})
+target_link_libraries(quic
+  INTERFACE Rust::rust_combined)
+
 # only for testing
 generate_cxxbridge(inc
   INPUT inc/src/lib.rs

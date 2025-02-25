@@ -51,6 +51,7 @@ target_link_libraries(db
     absl::headers
   PRIVATE
     data_dictionary
+    quic
     cql3)
 
 check_headers(check-headers db

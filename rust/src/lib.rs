@@ -7,4 +7,5 @@
  */
 
 extern crate inc;
+extern crate quic;
 extern crate wasmtime_bindings;
