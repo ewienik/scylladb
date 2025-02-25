@@ -14,6 +14,7 @@
 #include <seastar/coroutine/maybe_yield.hh>
 #include <seastar/json/json_elements.hh>
 #include <seastar/core/reactor.hh>
+#include <seastar/rpc/rpc.hh>
 
 #include "db/config.hh"
 #include "db/system_keyspace.hh"
@@ -973,6 +974,84 @@ private:
     }
 };
 
+struct serializer {};
+
+template <typename Output>
+inline void write(serializer, Output& out, const sstring& v) {
+    auto size = uint32_t(v.size());
+    out.write(reinterpret_cast<const char*>(&size), sizeof(size));
+    out.write(v.c_str(), v.size());
+}
+
+template <typename Input>
+inline sstring read(serializer, Input& in, rpc::type<sstring>) {
+    auto size = uint32_t(0);
+    in.read(reinterpret_cast<char*>(&size), sizeof(size));
+    sstring ret = uninitialized_string(size);
+    in.read(ret.data(), size);
+    return ret;
+}
+
+class vector_queries_table final : public streaming_virtual_table {
+    static schema_ptr build_schema() {
+        auto id = generate_legacy_id(system_keyspace::NAME, "vector_queries");
+        return schema_builder(system_keyspace::NAME, "vector_queries", std::make_optional(id))
+            .with_column("host", ascii_type, column_kind::partition_key)
+            .with_column("port", short_type)
+            .with_column("path", ascii_type)
+            .with_column("body", ascii_type)
+            .set_comment("Vector queries")
+            .with_hash_version()
+            .build();
+    }
+
+    future<> execute(reader_permit permit, result_collector& result, const query_restrictions& qr) override {
+        co_return;
+    }
+
+    future<> apply(const frozen_mutation& fm) override {
+        const mutation m = fm.unfreeze(_s);
+        const query::result_set rs(m);
+        const auto host = rs.row(0).get<sstring>("host");
+        const auto port = rs.row(0).get<std::int16_t>("port");
+        const auto path = rs.row(0).get<sstring>("path");
+        const auto body = rs.row(0).get<sstring>("body");
+
+        if (!host) {
+            co_await coroutine::return_exception_ptr(std::make_exception_ptr(virtual_table_update_exception("host value is required")));
+        }
+        if (!port) {
+            co_await coroutine::return_exception_ptr(std::make_exception_ptr(virtual_table_update_exception("port value is required")));
+        }
+        if (!path) {
+            co_await coroutine::return_exception_ptr(std::make_exception_ptr(virtual_table_update_exception("path value is required")));
+        }
+        if (!body) {
+            co_await coroutine::return_exception_ptr(std::make_exception_ptr(virtual_table_update_exception("body value is required")));
+        }
+        const auto addr = net::inet_address(*host);
+        auto client = std::make_unique<rpc::protocol<serializer>::client>(_myrpc, rpc::client_options{}, socket_address(addr, *port));
+        auto call = _myrpc.make_client<sstring (sstring)>(1);
+        auto resp = co_await call(*client, *body);
+        co_await client->stop();
+        co_await coroutine::return_exception_ptr(std::make_exception_ptr(
+            virtual_table_update_exception(
+                format("\nhost: {}\nport: {}\npath: {}\n------\n{}\n------\n",
+                    *host, *port, *path, resp)
+            )
+        ));
+    }
+
+
+    rpc::protocol<serializer> _myrpc;
+
+public:
+    explicit vector_queries_table()
+            : streaming_virtual_table(build_schema()), _myrpc(serializer{})
+    {
+        _shard_aware = true;
+    }
+};
 }
 
 future<> initialize_virtual_tables(
@@ -1006,6 +1085,7 @@ future<> initialize_virtual_tables(
     co_await add_table(std::make_unique<db_config_table>(cfg));
     co_await add_table(std::make_unique<clients_table>(ss));
     co_await add_table(std::make_unique<raft_state_table>(dist_raft_gr));
+    co_await add_table(std::make_unique<vector_queries_table>());
 
     db.find_column_family(system_keyspace::size_estimates()).set_virtual_reader(mutation_source(db::size_estimates::virtual_reader(db, sys_ks.local())));
     db.find_column_family(system_keyspace::v3::views_builds_in_progress()).set_virtual_reader(mutation_source(db::view::build_progress_virtual_reader(db)));
