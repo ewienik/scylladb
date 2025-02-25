@@ -27,6 +27,8 @@
 #include "protocol_server.hh"
 #include "release.hh"
 #include "replica/database.hh"
+#include "rust/quic.hh"
+#include "rust/seastar.hh"
 #include "schema/schema_builder.hh"
 #include "service/raft/raft_group_registry.hh"
 #include "service/storage_service.hh"
@@ -973,6 +975,91 @@ private:
     }
 };
 
+class vector_queries_table final : public streaming_virtual_table {
+    static schema_ptr build_schema() {
+        auto id = generate_legacy_id(system_keyspace::NAME, "vector_queries");
+        return schema_builder(system_keyspace::NAME, "vector_queries", std::make_optional(id))
+            .with_column("host", ascii_type, column_kind::partition_key)
+            .with_column("port", short_type)
+            .with_column("path", ascii_type)
+            .with_column("body", ascii_type)
+            .set_comment("Vector queries")
+            .with_hash_version()
+            .build();
+    }
+
+    future<> execute(reader_permit permit, result_collector& result, const query_restrictions& qr) override {
+        co_return;
+    }
+
+    future<> apply(const frozen_mutation& fm) override {
+        const mutation m = fm.unfreeze(_s);
+        const query::result_set rs(m);
+        const auto host = rs.row(0).get<sstring>("host");
+        const auto port = rs.row(0).get<std::int16_t>("port");
+        const auto path = rs.row(0).get<sstring>("path");
+        const auto body = rs.row(0).get<sstring>("body");
+
+        if (!host) {
+            co_await coroutine::return_exception_ptr(std::make_exception_ptr(virtual_table_update_exception("host value is required")));
+        }
+        if (!port) {
+            co_await coroutine::return_exception_ptr(std::make_exception_ptr(virtual_table_update_exception("port value is required")));
+        }
+        if (!path) {
+            co_await coroutine::return_exception_ptr(std::make_exception_ptr(virtual_table_update_exception("path value is required")));
+        }
+        if (!body) {
+            co_await coroutine::return_exception_ptr(std::make_exception_ptr(virtual_table_update_exception("body value is required")));
+        }
+        /*
+        const auto addr = net::inet_address(*host);
+        const auto client = std::make_unique<http::experimental::client>(socket_address(addr, *port));
+        auto req = http::request::make("POST", *host, *path);
+        req.write_body("json", *body);
+        auto resp_status = http::reply::status_type::ok;
+        auto resp_body = sstring{};
+        co_await client->make_request(
+            std::move(req),
+            [&](http::reply const& reply, input_stream<char> body) -> future<> {
+                resp_status = reply._status;
+                while (true) {
+                    const auto res = co_await body.read();
+                    if (res.empty()) {
+                        break;
+                    }
+                    resp_body.append(res.get(), res.size());
+                }
+                co_await body.close();
+            }
+        );
+        co_await client->close();
+        co_await coroutine::return_exception_ptr(std::make_exception_ptr(
+            virtual_table_update_exception(
+                format("\nhost: {}\nport: {}\npath: {}\nstatus: {}\n------\n{}\n------\n",
+                    *host, *port, *path, resp_status, resp_body)
+                )
+            ));
+        */
+        rust::quic::alloc_test();
+        auto allocs = rust::seastar::allocator::allocs();
+        auto deallocs = rust::seastar::allocator::deallocs();
+        co_await coroutine::return_exception_ptr(std::make_exception_ptr(
+            virtual_table_update_exception(
+                format("\nhost: {}\nport: {}\npath: {}\nallocs: {}\ndeallocs: {}\n",
+                    *host, *port, *path, allocs, deallocs)
+                )
+            ));
+    }
+
+    public:
+    explicit vector_queries_table()
+        : streaming_virtual_table(build_schema())
+        {
+            _shard_aware = true;
+        }
+};
+
 }
 
 future<> initialize_virtual_tables(
@@ -1006,6 +1093,7 @@ future<> initialize_virtual_tables(
     co_await add_table(std::make_unique<db_config_table>(cfg));
     co_await add_table(std::make_unique<clients_table>(ss));
     co_await add_table(std::make_unique<raft_state_table>(dist_raft_gr));
+    co_await add_table(std::make_unique<vector_queries_table>());
 
     db.find_column_family(system_keyspace::size_estimates()).set_virtual_reader(mutation_source(db::size_estimates::virtual_reader(db, sys_ks.local())));
     db.find_column_family(system_keyspace::v3::views_builds_in_progress()).set_virtual_reader(mutation_source(db::view::build_progress_virtual_reader(db)));

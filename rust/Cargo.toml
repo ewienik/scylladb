@@ -6,6 +6,8 @@ edition = "2021"
 
 [dependencies]
 inc = { path = "inc", version = "0.1.0" }
+quic = { path = "quic" }
+seastar_allocator = { path = "seastar_allocator" }
 wasmtime_bindings = { path = "wasmtime_bindings", version = "0.1.0" }
 
 [lib]

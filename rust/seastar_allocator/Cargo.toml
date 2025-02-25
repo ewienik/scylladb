@@ -1,0 +1,7 @@
+[package]
+name = "seastar_allocator"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cxx = { version = "1.0.83", features = ["c++20"] }
