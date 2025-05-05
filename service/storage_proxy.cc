@@ -101,6 +101,7 @@ namespace service {
 static logging::logger slogger("storage_proxy");
 static logging::logger qlogger("query_result");
 static logging::logger mlogger("mutation_data");
+static logging::logger plogger("query_ppery");
 
 namespace {
 
@@ -6270,19 +6271,26 @@ storage_proxy::query_result(schema_ptr query_schema,
     db::consistency_level cl,
     storage_proxy::coordinator_query_options query_options)
 {
-    if (slogger.is_enabled(logging::log_level::trace) || qlogger.is_enabled(logging::log_level::trace)) {
+    //if (slogger.is_enabled(logging::log_level::trace) || qlogger.is_enabled(logging::log_level::trace)) {
         static thread_local int next_id = 0;
         auto query_id = next_id++;
 
         slogger.trace("query {}.{} cmd={}, ranges={}, id={}", query_schema->ks_name(), query_schema->cf_name(), *cmd, partition_ranges, query_id);
-        return do_query(query_schema, cmd, std::move(partition_ranges), cl, std::move(query_options)).then_wrapped([query_id, cmd, query_schema] (future<result<coordinator_query_result>> f) -> result<coordinator_query_result> {
+        auto ann = false;
+        if (query_schema->ks_name() == "ks" && (query_schema->cf_name() == "vectors" || query_schema->cf_name() == "vectors2")) { ann = true; }
+        if (ann) {
+            plogger.info("query {}.{} cmd={}, ranges={}, id={}", query_schema->ks_name(), query_schema->cf_name(), *cmd, partition_ranges, query_id);
+        }
+        return do_query(query_schema, cmd, std::move(partition_ranges), cl, std::move(query_options)).then_wrapped([query_id, cmd, query_schema, ann] (future<result<coordinator_query_result>> f) -> result<coordinator_query_result> {
             auto rres = utils::result_try([&] {
                 return f.get();
             },  utils::result_catch_dots([&] (auto&& handle) {
                 slogger.trace("query id={} failed: {}", query_id, handle.as_inner());
+                plogger.info("query id={} failed: {}", query_id, handle.as_inner());
                 return handle.into_result();
             }));
             if (!rres) {
+                plogger.info("return err: query id={}", query_id);
                 return std::move(rres).as_failure();
             }
             auto qr = std::move(rres).value();
@@ -6290,13 +6298,22 @@ storage_proxy::query_result(schema_ptr query_schema,
             if (res->buf().is_linearized()) {
                 res->ensure_counts();
                 slogger.trace("query_result id={}, size={}, rows={}, partitions={}", query_id, res->buf().size(), *res->row_count(), *res->partition_count());
+                if (ann) {
+                    plogger.info("query_result id={}, size={}, rows={}, partitions={}", query_id, res->buf().size(), *res->row_count(), *res->partition_count());
+                }
             } else {
                 slogger.trace("query_result id={}, size={}", query_id, res->buf().size());
+                if (ann) {
+                    plogger.info("query_result id={}, size={}", query_id, res->buf().size());
+                }
             }
             qlogger.trace("id={}, {}", query_id, res->pretty_printer(query_schema, cmd->slice));
+            if (ann) {
+                plogger.info("id={}, {}", query_id, res->pretty_printer(query_schema, cmd->slice));
+            }
             return qr;
         });
-    }
+    //}
 
     return do_query(query_schema, cmd, std::move(partition_ranges), cl, std::move(query_options));
 }
@@ -6308,25 +6325,39 @@ storage_proxy::do_query(schema_ptr s,
     db::consistency_level cl,
     storage_proxy::coordinator_query_options query_options)
 {
+    auto ann = false;
+    if (s->ks_name() == "ks" && (s->cf_name() == "vectors" || s->cf_name() == "vectors2")) { ann = true; }
     static auto make_empty = [] {
         return make_ready_future<result<coordinator_query_result>>(make_foreign(make_lw_shared<query::result>()));
     };
 
     auto& slice = cmd->slice;
+    if (ann) {
+        plogger.info("do_query: partition_ranges.empty(): {} {} {}", partition_ranges.empty(), slice.default_row_ranges().empty(), bool(slice.get_specific_ranges()));
+    }
     if (partition_ranges.empty() ||
             (slice.default_row_ranges().empty() && !slice.get_specific_ranges())) {
         return make_empty();
     }
 
     if (db::is_serial_consistency(cl)) {
+        if (ann) {
+            plogger.info("do_query: is serial consistency");
+        }
         auto f = do_query_with_paxos(std::move(s), std::move(cmd), std::move(partition_ranges), cl, std::move(query_options));
         return utils::then_ok_result<result<storage_proxy::coordinator_query_result>>(std::move(f));
     } else {
+        if (ann) {
+            plogger.info("do_query: no serial consistency");
+        }
         utils::latency_counter lc;
         lc.start();
         auto p = shared_from_this();
 
         if (query::is_single_partition(partition_ranges[0])) { // do not support mixed partitions (yet?)
+            if (ann) {
+                plogger.info("do_query: is_single_partition");
+            }
             try {
                 return query_singular(cmd,
                         std::move(partition_ranges),
@@ -6335,6 +6366,9 @@ storage_proxy::do_query(schema_ptr s,
                     p->get_stats().read.mark(lc.stop().latency());
                 });
             } catch (const replica::no_such_column_family&) {
+                if (ann) {
+                    plogger.info("do_query: no_such_column_family");
+                }
                 get_stats().read.mark(lc.stop().latency());
                 return make_empty();
             }

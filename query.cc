@@ -342,6 +342,7 @@ static void write_partial_partition(ser::writer_of_qr_partition<bytes_ostream>&&
 }
 
 foreign_ptr<lw_shared_ptr<query::result>> result_merger::get() {
+    //qlogger.info("ppery: get {}", _partial.size());
     if (_partial.size() == 1) {
         return std::move(_partial[0]);
     }
@@ -357,12 +358,14 @@ foreign_ptr<lw_shared_ptr<query::result>> result_merger::get() {
     for (auto&& r : _partial) {
         result_view::do_with(*r, [&] (result_view rv) {
             last_position.reset();
+            //qlogger.info("ppery: partitions {}", rv._v.partitions().size());
             for (auto&& pv : rv._v.partitions()) {
                 auto rows = pv.rows();
                 // If rows.empty(), then there's a static row, or there wouldn't be a partition
                 const uint64_t rows_in_partition = rows.size() ? : 1;
                 const uint64_t rows_to_include = std::min(_max_rows - row_count, rows_in_partition);
                 row_count += rows_to_include;
+                //qlogger.info("ppery: rows_to_include {}", rows_to_include);
                 if (rows_to_include >= rows_in_partition) {
                     partitions.add(pv);
                     if (++partition_count >= _max_partitions) {

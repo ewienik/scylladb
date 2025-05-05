@@ -758,13 +758,17 @@ indexed_table_select_statement::do_execute_base_query(
     auto cmd = prepare_command_for_base_query(qp, options, state, now, bool(paging_state));
     auto timeout = db::timeout_clock::now() + get_timeout(state.get_client_state(), options);
 
+    logger.info("ppery: cmd #1: {}", cmd);
+
     query::result_merger merger(cmd->get_row_limit(), query::max_partitions);
+    logger.info("ppery: row_limit: {}", cmd->get_row_limit());
     std::vector<primary_key> keys = std::move(primary_keys);
     std::vector<primary_key>::iterator key_it(keys.begin());
     size_t previous_result_size = 0;
     size_t next_iteration_size = 0;
 
     const bool is_paged = bool(paging_state);
+    logger.info("ppery: is_paged: {}", is_paged);
     while (key_it != keys.end()) {
         // Starting with 1 key, we check if the result was a short read, and if not,
         // we continue exponentially, asking for 2x more key than before
@@ -778,23 +782,29 @@ indexed_table_select_statement::do_execute_base_query(
         auto key_it_end = key_it + next_iteration_size;
 
         query::result_merger oneshot_merger(cmd->get_row_limit(), query::max_partitions);
-        coordinator_result<foreign_ptr<lw_shared_ptr<query::result>>> rresult = co_await utils::result_map_reduce(key_it, key_it_end, coroutine::lambda([&] (auto& key)
+        coordinator_result<foreign_ptr<lw_shared_ptr<query::result>>> rresult = co_await utils::result_map_reduce(key_it, key_it_end, coroutine::lambda([&] (primary_key& key)
                 -> future<coordinator_result<foreign_ptr<lw_shared_ptr<query::result>>>> {
             auto command = ::make_lw_shared<query::read_command>(*cmd);
+            logger.info("ppery: cmd #2: {}", command);
             // for each partition, read just one clustering row (TODO: can
             // get all needed rows of one partition at once.)
-            command->slice._row_ranges.clear();
             if (key.clustering) {
+                logger.info("ppery: clustering");
+                command->slice._row_ranges.clear();
                 command->slice._row_ranges.push_back(query::clustering_range::make_singular(key.clustering));
             }
+            logger.info("ppery: cmd #3: {}", command);
             coordinator_result<service::storage_proxy::coordinator_query_result> rqr
                     = co_await qp.proxy().query_result(_schema, command, {dht::partition_range::make_singular(key.partition)}, options.get_consistency(), {timeout, state.get_permit(), state.get_client_state(), state.get_trace_state()});
             if (!rqr.has_value()) {
+                logger.info("ppery: return #1");
                 co_return std::move(rqr).as_failure();
             }
+            logger.info("ppery: return #2");
             co_return std::move(rqr.value().query_result);
         }), std::move(oneshot_merger));
         if (!rresult.has_value()) {
+            logger.info("ppery: return #3");
             co_return std::move(rresult).as_failure();
         }
         auto& result = rresult.value();
@@ -802,12 +812,15 @@ indexed_table_select_statement::do_execute_base_query(
         // Results larger than 1MB should be shipped to the client immediately
         const bool page_limit_reached = is_paged && result->buf().size() >= query::result_memory_limiter::maximum_result_size;
         previous_result_size = result->buf().size();
+        logger.info("ppery: result: {} {}", result->is_short_read(), result->buf().size());
         merger(std::move(result));
         key_it = key_it_end;
         if (is_short_read || page_limit_reached) {
+            logger.info("ppery: break");
             break;
         }
     }
+    logger.info("ppery: return #4");
     co_return value_type(merger.get(), std::move(cmd));
 }
 
@@ -887,9 +900,11 @@ indexed_table_select_statement::process_base_query_results(
         lw_shared_ptr<const service::pager::paging_state> paging_state) const
 {
     if (paging_state) {
+        logger.info("ppery: paging_state");
         paging_state = generate_view_paging_state_from_base_query_results(paging_state, results, state, options);
         _selection->get_result_metadata()->maybe_set_paging_state(std::move(paging_state));
     }
+    logger.info("ppery: process_results: {} {}", results->partition_count(), results->row_count());
     return process_results(std::move(results), std::move(cmd), options, now);
 }
 
@@ -1142,6 +1157,11 @@ indexed_table_select_statement::do_execute(query_processor& qp,
 
     SCYLLA_ASSERT(_restrictions->uses_secondary_indexing());
 
+    if (_view_schema->ks_name() == "ks" && _index.metadata().name() == "idx") {
+        auto primary_keys = co_await qp.vector_store().ann(_view_schema->ks_name(), _index.metadata().name(), _schema, std::vector{0.1F, 0.1F, 0.1F}, 1);
+        co_return co_await this->execute_base_query(qp, std::move(*primary_keys), state, options, now, options.get_paging_state());
+    }
+
     _stats.unpaged_select_queries(_ks_sel) += options.get_page_size() <= 0;
 
     // Secondary index search has two steps: 1. use the index table to find a
@@ -1250,6 +1270,7 @@ indexed_table_select_statement::do_execute(query_processor& qp,
 
     if (whole_partitions || partition_slices) {
         tracing::trace(state.get_trace_state(), "Consulting index {} for a single slice of keys", _index.metadata().name());
+        logger.info("ppery: Consulting index {} for a single slice of keys", _index.metadata().name());
         // In this case, can use our normal query machinery, which retrieves
         // entire partitions or the same slice for many partitions.
         coordinator_result<std::tuple<dht::partition_range_vector, lw_shared_ptr<const service::pager::paging_state>>> result = co_await find_index_partition_ranges(qp, state, options);
@@ -1262,6 +1283,7 @@ indexed_table_select_statement::do_execute(query_processor& qp,
         }
     } else {
         tracing::trace(state.get_trace_state(), "Consulting index {} for a list of rows containing keys", _index.metadata().name());
+        logger.info("ppery: Consulting index {} for a list of rows containing keys", _index.metadata().name());
         // In this case, we need to retrieve a list of rows (not entire
         // partitions) and then retrieve those specific rows.
         coordinator_result<std::tuple<std::vector<primary_key>, lw_shared_ptr<const service::pager::paging_state>>> result = co_await find_index_clustering_rows(qp, state, options);
