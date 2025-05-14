@@ -102,6 +102,7 @@ public:
     gms::inet_address broadcast_address = gms::inet_address("localhost");
     bool ms_listen = false;
     bool run_with_raft_recovery = false;
+    std::optional<socket_address> vector_store_addr;
 
     std::optional<timeout_config> query_timeout;
 
