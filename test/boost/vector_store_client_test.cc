@@ -140,7 +140,7 @@ SEASTAR_TEST_CASE(vector_store_client_test_dns_started) {
         co_return inet_address("127.0.0.1");
     });
 
-    co_await vs.start_background_tasks();
+    vs.start_background_tasks();
 
     auto addr = co_await vector_store_client_tester::resolve_hostname(vs);
     BOOST_REQUIRE(addr);
@@ -165,7 +165,7 @@ SEASTAR_TEST_CASE(vector_store_client_test_dns_resolve_failure) {
         co_return std::nullopt;
     });
 
-    co_await vs.start_background_tasks();
+    vs.start_background_tasks();
 
     BOOST_CHECK(!co_await vector_store_client_tester::resolve_hostname(vs));
 
@@ -191,7 +191,7 @@ SEASTAR_TEST_CASE(vector_store_client_test_dns_resolving_repeated) {
         co_return inet_address(format("127.0.0.{}", count));
     });
 
-    co_await vs.start_background_tasks();
+    vs.start_background_tasks();
 
     BOOST_CHECK(co_await repeat_until(std::chrono::milliseconds(1000), [&vs]() -> future<bool> {
         co_return co_await vector_store_client_tester::resolve_hostname(vs);
@@ -234,7 +234,7 @@ SEASTAR_TEST_CASE(vector_store_client_test_dns_refresh_respects_interval) {
         co_return inet_address("127.0.0.1");
     });
 
-    co_await vs.start_background_tasks();
+    vs.start_background_tasks();
 
     auto addr = co_await vector_store_client_tester::resolve_hostname(vs);
     BOOST_REQUIRE(addr);
@@ -300,7 +300,7 @@ SEASTAR_TEST_CASE(vector_store_client_test_ann_addr_unavailable) {
                     co_return std::nullopt;
                 });
 
-                co_await vs.start_background_tasks();
+                vs.start_background_tasks();
 
                 auto keys = co_await vs.ann("ks", "idx", schema, std::vector<float>{0.1, 0.2, 0.3}, 2);
                 BOOST_REQUIRE(!keys);
@@ -333,7 +333,7 @@ SEASTAR_TEST_CASE(vector_store_client_test_ann_service_unavailable) {
                     co_return inet_address("127.0.0.1");
                 });
 
-                co_await vs.start_background_tasks();
+                vs.start_background_tasks();
 
                 auto keys = co_await vs.ann("ks", "idx", schema, std::vector<float>{0.1, 0.2, 0.3}, 2);
                 BOOST_REQUIRE(!keys);
@@ -382,7 +382,7 @@ SEASTAR_TEST_CASE(vector_store_client_test_ann_request) {
                     co_return inet_address("127.0.0.1");
                 });
 
-                co_await vs.start_background_tasks();
+                vs.start_background_tasks();
 
                 // set the wrong idx (wrong endpoint) - service should return 404
                 auto keys = co_await vs.ann("ks", "idx2", schema, std::vector<float>{0.1, 0.2, 0.3}, 2);

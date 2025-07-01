@@ -391,9 +391,9 @@ vector_store_client::vector_store_client(config const& cfg) {
 
 vector_store_client::~vector_store_client() = default;
 
-auto vector_store_client::start_background_tasks() -> future<> {
+void vector_store_client::start_background_tasks() {
     if (is_disabled()) {
-        co_return;
+        return;
     }
 
     /// start the background task to refresh the service address

@@ -71,7 +71,7 @@ public:
     ~vector_store_client();
 
     /// Start background tasks.
-    auto start_background_tasks() -> future<>;
+    void start_background_tasks();
 
     /// Stop the service.
     auto stop() -> future<>;
