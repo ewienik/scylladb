@@ -47,6 +47,7 @@ public:
     using primary_keys = std::vector<primary_key>;
     using schema_ptr = lw_shared_ptr<schema const>;
     using status_type = http::reply::status_type;
+    using time_point = lowres_clock::time_point;
 
     /// The vector-store service is disabled.
     struct disabled {};
@@ -88,7 +89,7 @@ public:
     [[nodiscard]] auto port() const -> std::expected<port_number, disabled>;
 
     /// Request the vector store service for the primary keys of the nearest neighbors
-    auto ann(keyspace_name keyspace, index_name name, schema_ptr schema, embedding embedding, limit limit) -> future<std::expected<primary_keys, ann_error>>;
+    auto ann(keyspace_name keyspace, index_name name, schema_ptr schema, embedding embedding, limit limit, time_point deadline) -> future<std::expected<primary_keys, ann_error>>;
 
 private:
     friend struct vector_store_client_tester;
