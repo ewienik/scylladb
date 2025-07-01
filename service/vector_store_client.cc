@@ -395,7 +395,7 @@ void vector_store_client::start_background_tasks() {
     (void)try_with_gate(_impl->tasks_gate, [this] {
         return _impl->refresh_addr_task();
     }).handle_exception([](std::exception_ptr eptr) {
-        vslogger.error("Failed to start a Vector Store Client refresh task: {}", eptr);
+        on_internal_error_noexcept(vslogger, format("The Vector Store Client refresh task failed: {}", eptr));
     });
 }
 
