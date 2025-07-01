@@ -424,7 +424,7 @@ auto vector_store_client::port() const -> std::expected<port_number, disabled> {
     return {_impl->port};
 }
 
-auto vector_store_client::ann(keyspace_name keyspace, index_name name, schema_ptr schema, embedding embedding, limit limit)
+auto vector_store_client::ann(keyspace_name keyspace, index_name name, schema_ptr schema, embedding embedding, limit limit, time_point deadline)
         -> future<std::expected<primary_keys, ann_error>> {
     if (is_disabled()) {
         vslogger.error("Disabled Vector Store while calling ann");
