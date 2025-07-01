@@ -201,7 +201,7 @@ struct vector_store_client::impl {
     condition_variable refresh_client_cv;
     condition_variable refresh_stop_cv;
     condition_variable cleanup_stop_cv;
-    bool stop_refreshing{};
+    bool stop_refreshing = false;
     milliseconds dns_refresh_interval = DNS_REFRESH_INTERVAL;
     milliseconds wait_for_client_timeout = WAIT_FOR_CLIENT_TIMEOUT;
     milliseconds http_request_timeout = HTTP_REQUEST_TIMEOUT;
