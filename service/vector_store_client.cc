@@ -44,9 +44,6 @@ using primary_keys = service::vector_store_client::primary_keys;
 using service_reply_format_error = service::vector_store_client::service_reply_format_error;
 using time_point = lowres_clock::time_point;
 
-// Minimum interval between cleanup tasks
-constexpr auto CLEANUP_INTERVAL = std::chrono::seconds(5);
-
 // Minimum interval between dns name refreshes
 constexpr auto DNS_REFRESH_INTERVAL = std::chrono::seconds(5);
 
@@ -200,7 +197,6 @@ struct vector_store_client::impl {
     condition_variable refresh_cv;
     condition_variable refresh_client_cv;
     condition_variable refresh_stop_cv;
-    condition_variable cleanup_stop_cv;
     bool stop_refreshing = false;
     milliseconds dns_refresh_interval = DNS_REFRESH_INTERVAL;
     milliseconds wait_for_client_timeout = WAIT_FOR_CLIENT_TIMEOUT;
@@ -265,8 +261,14 @@ struct vector_store_client::impl {
             // new client is available
             refresh_client_cv.broadcast();
 
+
+            co_await cleanup_old_clients();
+
             co_await refresh_cv.when();
         }
+
+        co_await cleanup_old_clients();
+        co_await cleanup_current_client();
     }
 
     /// Request a DNS refresh in the specific task.
@@ -274,8 +276,16 @@ struct vector_store_client::impl {
         refresh_cv.signal();
     }
 
+    /// Cleanup current client
+    auto cleanup_current_client() -> future<> {
+        if (current_client) {
+            co_await current_client->close();
+        }
+        current_client = nullptr;
+    }
+
     /// Cleanup old clients that are no longer used.
-    auto cleanup() -> future<> {
+    auto cleanup_old_clients() -> future<> {
         // iterate over old clients and close them. There is a co_await in the loop
         // so we need to use [] accessor and copying clients to avoid dangling references of iterators.
         // NOLINTNEXTLINE(modernize-loop-convert)
@@ -290,21 +300,6 @@ struct vector_store_client::impl {
         std::erase_if(old_clients, [](auto const& client) {
             return !client;
         });
-    }
-
-    /// A task for cleaning up old clients.
-    auto cleanup_task() -> future<> {
-        for (;;) {
-            if (co_await wait_for_signal(cleanup_stop_cv, lowres_clock::now() + CLEANUP_INTERVAL)) {
-                break;
-            }
-            co_await cleanup();
-        }
-        co_await cleanup();
-        if (current_client) {
-            co_await current_client->close();
-        }
-        current_client = nullptr;
     }
 
     struct get_client_response {
@@ -402,13 +397,6 @@ void vector_store_client::start_background_tasks() {
     }).handle_exception([](std::exception_ptr eptr) {
         vslogger.error("Failed to start a Vector Store Client refresh task: {}", eptr);
     });
-
-    /// start the background task to cleanup
-    (void)try_with_gate(_impl->tasks_gate, [this] {
-        return _impl->cleanup_task();
-    }).handle_exception([](std::exception_ptr eptr) {
-        vslogger.error("Failed to start a Vector Store Client cleanup task: {}", eptr);
-    });
 }
 
 auto vector_store_client::stop() -> future<> {
@@ -419,7 +407,6 @@ auto vector_store_client::stop() -> future<> {
     _impl->stop_refreshing = true;
     _impl->refresh_stop_cv.signal();
     _impl->refresh_cv.signal();
-    _impl->cleanup_stop_cv.signal();
     co_await _impl->tasks_gate.close();
 }
 
