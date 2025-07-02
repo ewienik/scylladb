@@ -377,6 +377,45 @@ SEASTAR_TEST_CASE(vector_store_client_test_ann_service_unavailable) {
             cfg);
 }
 
+SEASTAR_TEST_CASE(vector_store_client_test_ann_service_aborted) {
+    auto cfg = cql_test_config();
+    cfg.db_config->vector_store_uri.set(format("http://good.authority.here:{}", generate_unavailable_localhost_port()));
+    co_await do_with_cql_env(
+            [](cql_test_env& env) -> future<> {
+                co_await env.execute_cql(R"(
+                    create table ks.vs (
+                        pk1 tinyint, pk2 tinyint,
+                        ck1 tinyint, ck2 tinyint,
+                        embedding vector<float, 3>,
+                        primary key ((pk1, pk2), ck1, ck2))
+                )");
+
+                auto schema = env.local_db().find_schema("ks", "vs");
+                auto& vs = env.local_qp().vector_store_client();
+
+                vector_store_client_tester::set_dns_refresh_interval(vs, std::chrono::milliseconds(10));
+                vector_store_client_tester::set_wait_for_client_timeout(vs, std::chrono::milliseconds(100));
+                vector_store_client_tester::set_http_request_retries(vs, 3);
+                vector_store_client_tester::set_dns_resolver(vs, [](auto const& host) -> future<std::optional<inet_address>> {
+                    BOOST_CHECK_EQUAL(host, "good.authority.here");
+                    co_await sleep(std::chrono::milliseconds(100));
+                    co_return inet_address("127.0.0.1");
+                });
+
+                vs.start_background_tasks();
+
+                auto as = abort_source();
+                auto timeout = timer([&as]() {
+                        as.request_abort();
+                        });
+                timeout.arm(std::chrono::milliseconds(10));
+                auto keys = co_await vs.ann("ks", "idx", schema, std::vector<float>{0.1, 0.2, 0.3}, 2, as);
+                BOOST_REQUIRE(!keys);
+                BOOST_CHECK(std::get_if<vector_store_client::aborted>(&keys.error()) != nullptr);
+            },
+            cfg);
+}
+
 
 SEASTAR_TEST_CASE(vector_store_client_test_ann_request) {
     auto ann_replies = make_lw_shared<std::queue<std::tuple<sstring, sstring>>>();
