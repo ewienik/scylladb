@@ -47,7 +47,6 @@ public:
     using primary_keys = std::vector<primary_key>;
     using schema_ptr = lw_shared_ptr<schema const>;
     using status_type = http::reply::status_type;
-    using time_point = lowres_clock::time_point;
 
     /// The vector_store_client service is disabled.
     struct disabled {};
@@ -69,7 +68,7 @@ public:
     /// An unsupported reply format from the vector-store service.
     struct service_reply_format_error {};
 
-    using ann_error = std::variant<disabled, addr_unavailable, service_unavailable, service_error, service_reply_format_error>;
+    using ann_error = std::variant<disabled, aborted, addr_unavailable, service_unavailable, service_error, service_reply_format_error>;
 
     explicit vector_store_client(config const& cfg);
     ~vector_store_client();
@@ -92,7 +91,8 @@ public:
     [[nodiscard]] auto port() const -> std::expected<port_number, disabled>;
 
     /// Request the vector store service for the primary keys of the nearest neighbors
-    auto ann(keyspace_name keyspace, index_name name, schema_ptr schema, embedding embedding, limit limit, time_point deadline) -> future<std::expected<primary_keys, ann_error>>;
+    auto ann(keyspace_name keyspace, index_name name, schema_ptr schema, embedding embedding, limit limit, abort_source& as)
+            -> future<std::expected<primary_keys, ann_error>>;
 
 private:
     friend struct vector_store_client_tester;
@@ -102,7 +102,7 @@ private:
 struct vector_store_client_tester {
     static void set_dns_refresh_interval(vector_store_client& vsc, std::chrono::milliseconds interval);
     static void set_wait_for_client_timeout(vector_store_client& vsc, std::chrono::milliseconds timeout);
-    static void set_http_request_timeout(vector_store_client& vsc, std::chrono::milliseconds timeout);
+    static void set_http_request_retries(vector_store_client& vsc, unsigned retries);
     static void set_dns_resolver(vector_store_client& vsc, std::function<future<std::optional<net::inet_address>>(sstring const&)> resolver);
     static void trigger_dns_resolver(vector_store_client& vsc);
     static auto resolve_hostname(vector_store_client& vsc) -> future<std::optional<net::inet_address>>;
