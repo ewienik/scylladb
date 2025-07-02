@@ -142,7 +142,8 @@ SEASTAR_TEST_CASE(vector_store_client_test_dns_started) {
 
     vs.start_background_tasks();
 
-    auto addr = co_await vector_store_client_tester::resolve_hostname(vs);
+    auto as = abort_source();
+    auto addr = co_await vector_store_client_tester::resolve_hostname(vs, as);
     BOOST_REQUIRE(addr);
     BOOST_CHECK_EQUAL(print_addr(*addr), "127.0.0.1");
 
@@ -167,7 +168,8 @@ SEASTAR_TEST_CASE(vector_store_client_test_dns_resolve_failure) {
 
     vs.start_background_tasks();
 
-    BOOST_CHECK(!co_await vector_store_client_tester::resolve_hostname(vs));
+    auto as = abort_source();
+    BOOST_CHECK(!co_await vector_store_client_tester::resolve_hostname(vs, as));
 
     co_await vs.stop();
 }
@@ -193,25 +195,26 @@ SEASTAR_TEST_CASE(vector_store_client_test_dns_resolving_repeated) {
 
     vs.start_background_tasks();
 
-    BOOST_CHECK(co_await repeat_until(std::chrono::milliseconds(1000), [&vs]() -> future<bool> {
-        co_return co_await vector_store_client_tester::resolve_hostname(vs);
+    auto as = abort_source();
+    BOOST_CHECK(co_await repeat_until(std::chrono::milliseconds(1000), [&vs, &as]() -> future<bool> {
+        co_return co_await vector_store_client_tester::resolve_hostname(vs, as);
     }));
     BOOST_CHECK_EQUAL(count, 3);
-    auto addr = co_await vector_store_client_tester::resolve_hostname(vs);
+    auto addr = co_await vector_store_client_tester::resolve_hostname(vs, as);
     BOOST_REQUIRE(addr);
     BOOST_CHECK_EQUAL(print_addr(*addr), "127.0.0.3");
 
     vector_store_client_tester::trigger_dns_resolver(vs);
 
-    BOOST_CHECK(co_await repeat_until(std::chrono::milliseconds(1000), [&vs]() -> future<bool> {
-        co_return !co_await vector_store_client_tester::resolve_hostname(vs);
+    BOOST_CHECK(co_await repeat_until(std::chrono::milliseconds(1000), [&vs, &as]() -> future<bool> {
+        co_return !co_await vector_store_client_tester::resolve_hostname(vs, as);
     }));
 
-    BOOST_CHECK(co_await repeat_until(std::chrono::milliseconds(1000), [&vs]() -> future<bool> {
-        co_return co_await vector_store_client_tester::resolve_hostname(vs);
+    BOOST_CHECK(co_await repeat_until(std::chrono::milliseconds(1000), [&vs, &as]() -> future<bool> {
+        co_return co_await vector_store_client_tester::resolve_hostname(vs, as);
     }));
     BOOST_CHECK_EQUAL(count, 6);
-    addr = co_await vector_store_client_tester::resolve_hostname(vs);
+    addr = co_await vector_store_client_tester::resolve_hostname(vs, as);
     BOOST_REQUIRE(addr);
     BOOST_CHECK_EQUAL(print_addr(*addr), "127.0.0.6");
 
@@ -236,7 +239,8 @@ SEASTAR_TEST_CASE(vector_store_client_test_dns_refresh_respects_interval) {
 
     vs.start_background_tasks();
 
-    auto addr = co_await vector_store_client_tester::resolve_hostname(vs);
+    auto as = abort_source();
+    auto addr = co_await vector_store_client_tester::resolve_hostname(vs, as);
     BOOST_REQUIRE(addr);
     BOOST_CHECK_EQUAL(print_addr(*addr), "127.0.0.1");
     BOOST_CHECK_EQUAL(count, 1);
@@ -248,11 +252,39 @@ SEASTAR_TEST_CASE(vector_store_client_test_dns_refresh_respects_interval) {
     vector_store_client_tester::trigger_dns_resolver(vs);
     co_await sleep(std::chrono::milliseconds(20)); // wait for the next DNS refresh
 
-    addr = co_await vector_store_client_tester::resolve_hostname(vs);
+    addr = co_await vector_store_client_tester::resolve_hostname(vs, as);
     BOOST_REQUIRE(addr);
     BOOST_CHECK_EQUAL(print_addr(*addr), "127.0.0.1");
     BOOST_CHECK_GE(count, 1);
     BOOST_CHECK_LE(count, 2);
+
+    co_await vs.stop();
+}
+
+/// DNS refresh could be aborted
+SEASTAR_TEST_CASE(vector_store_client_test_dns_refresh_aborted) {
+    auto cfg = config();
+    cfg.vector_store_uri.set("http://good.authority.here:6080");
+    auto vs = vector_store_client{cfg};
+    BOOST_CHECK(!vs.is_disabled());
+
+    vector_store_client_tester::set_dns_refresh_interval(vs, std::chrono::milliseconds(10));
+    vector_store_client_tester::set_wait_for_client_timeout(vs, std::chrono::milliseconds(100));
+    vector_store_client_tester::set_dns_resolver(vs, [](auto const& host) -> future<std::optional<inet_address>> {
+        BOOST_CHECK_EQUAL(host, "good.authority.here");
+        co_await sleep(std::chrono::milliseconds(100));
+        co_return inet_address("127.0.0.1");
+    });
+
+    vs.start_background_tasks();
+
+    auto as = abort_source();
+    auto timeout = timer([&as]() {
+        as.request_abort();
+    });
+    timeout.arm(std::chrono::milliseconds(10));
+    auto addr = co_await vector_store_client_tester::resolve_hostname(vs, as);
+    BOOST_CHECK(!addr);
 
     co_await vs.stop();
 }

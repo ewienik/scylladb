@@ -549,11 +549,10 @@ void vector_store_client_tester::trigger_dns_resolver(vector_store_client& vsc) 
     vsc._impl->trigger_dns_refresh();
 }
 
-auto vector_store_client_tester::resolve_hostname(vector_store_client& vsc) -> future<std::optional<inet_address>> {
+auto vector_store_client_tester::resolve_hostname(vector_store_client& vsc, abort_source& as) -> future<std::optional<inet_address>> {
     if (vsc.is_disabled()) {
         on_internal_error(vslogger, "Cannot check hostname resolving on a disabled vector store client");
     }
-    auto as = abort_source{};
     auto client_host = co_await vsc._impl->get_client(as);
     if (!client_host) {
         co_return std::nullopt;
