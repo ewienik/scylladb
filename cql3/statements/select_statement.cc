@@ -1193,7 +1193,8 @@ indexed_table_select_statement::do_execute(query_processor& qp,
             std::back_inserter(ann_vector),
             [](const auto& v) { return value_cast<float>(v); });
 
-        auto pkeys = co_await qp.vector_store_client().ann(_schema->ks_name(), _index.metadata().name(), _schema , std::move(ann_vector), limit, lowres_clock::now() + std::chrono::seconds(5));
+        auto as = abort_source();
+        auto pkeys = co_await qp.vector_store_client().ann(_schema->ks_name(), _index.metadata().name(), _schema , std::move(ann_vector), limit, as);
         
         if (!pkeys.has_value()) {
             co_await coroutine::return_exception(exceptions::invalid_request_exception(fmt::format("ANN query cannot be executed with vector_store disabled")));
