@@ -49,7 +49,7 @@ public:
     using status_type = http::reply::status_type;
     using time_point = lowres_clock::time_point;
 
-    /// The vector-store service is disabled.
+    /// The vector_store_client service is disabled.
     struct disabled {};
 
     /// The vector-store addr is unavailable (not possible to get an addr from the dns service).
