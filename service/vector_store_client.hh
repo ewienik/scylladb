@@ -52,6 +52,9 @@ public:
     /// The vector_store_client service is disabled.
     struct disabled {};
 
+    /// The operation was aborted.
+    struct aborted {};
+
     /// The vector-store addr is unavailable (not possible to get an addr from the dns service).
     struct addr_unavailable {};
 
