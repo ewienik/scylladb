@@ -14,10 +14,14 @@
 #include "dht/i_partitioner.hh"
 #include "keys.hh"
 #include "utils/rjson.hh"
+#include "utils/sequential_producer.hh"
 #include "schema/schema.hh"
 #include <charconv>
+#include <exception>
 #include <fmt/ranges.h>
 #include <regex>
+#include <seastar/coroutine/as_future.hh>
+#include <seastar/coroutine/exception.hh>
 #include <seastar/http/client.hh>
 #include <seastar/http/request.hh>
 #include <seastar/net/dns.hh>
@@ -29,6 +33,7 @@ namespace {
 
 using ann_error = service::vector_store_client::ann_error;
 using configuration_exception = exceptions::configuration_exception;
+using duration = lowres_clock::duration;
 using embedding = service::vector_store_client::embedding;
 using limit = service::vector_store_client::limit;
 using host_name = service::vector_store_client::host_name;
@@ -82,13 +87,35 @@ auto parse_service_uri(std::string_view uri) -> std::optional<std::tuple<host_na
 }
 
 /// Wait for a condition variable to be signaled or timeout.
-auto wait_for_signal(condition_variable& cv, time_point timeout) -> future<bool> {
-    try {
-        co_await cv.wait(timeout);
-        co_return true;
-    } catch (condition_variable_timed_out&) { // NOLINT(bugprone-empty-catch)
+auto wait_for_timeout(duration timeout, abort_source& as) -> future<bool> {
+    auto result = co_await coroutine::as_future(sleep_abortable(timeout, as));
+    if (result.failed()) {
+        auto err = result.get_exception();
+        if (as.abort_requested()) {
+            co_return false;
+        }
+        if (try_catch<std::system_error>(err) != nullptr) {
+            std::rethrow_exception(err);
+        }
+        co_await coroutine::return_exception_ptr(std::move(err));
     }
-    co_return false;
+    co_return true;
+}
+
+/// Wait for a condition variable to be signaled or timeout.
+auto wait_for_signal(condition_variable& cv, time_point timeout) -> future<bool> {
+    auto result = co_await coroutine::as_future(cv.wait(timeout));
+    if (result.failed()) {
+        auto err = result.get_exception();
+        if (try_catch<condition_variable_timed_out>(err) != nullptr) {
+            co_return false;
+        }
+        if (try_catch<std::system_error>(err) != nullptr) {
+            std::rethrow_exception(err);
+        }
+        co_await coroutine::return_exception_ptr(std::move(err));
+    }
+    co_return true;
 }
 
 auto get_key_column_value(const rjson::value& item, std::size_t idx, const column_definition& column) -> std::expected<bytes, ann_error> {
@@ -196,22 +223,32 @@ struct vector_store_client::impl {
     gate tasks_gate;
     condition_variable refresh_cv;
     condition_variable refresh_client_cv;
-    condition_variable refresh_stop_cv;
+    abort_source abort_refresh;
     bool stop_refreshing = false;
     milliseconds dns_refresh_interval = DNS_REFRESH_INTERVAL;
     milliseconds wait_for_client_timeout = WAIT_FOR_CLIENT_TIMEOUT;
     milliseconds http_request_timeout = HTTP_REQUEST_TIMEOUT;
     std::function<future<std::optional<inet_address>>(sstring const&)> dns_resolver;
+    sequential_producer<lw_shared_ptr<http_client>> client_producer;
 
     impl(host_name host_, port_number port_)
         : host(std::move(host_))
         , port(port_)
         , dns_resolver([](auto const& host) -> future<std::optional<inet_address>> {
-            try {
-                co_return co_await net::dns::resolve_name(host);
-            } catch (std::system_error const&) { // NOLINT(bugprone-empty-catch)
+            auto addr = co_await coroutine::as_future(net::dns::resolve_name(host));
+            if (addr.failed()) {
+                auto err = addr.get_exception();
+                if (try_catch<std::system_error>(err) != nullptr) {
+                    co_return std::nullopt;
+                }
+                co_await coroutine::return_exception_ptr(std::move(err));
             }
-            co_return std::nullopt;
+            co_return co_await std::move(addr);
+        })
+        , client_producer([&]() -> future<lw_shared_ptr<http_client>> {
+            trigger_dns_refresh();
+            co_await wait_for_signal(refresh_client_cv, lowres_clock::now() + wait_for_client_timeout);
+            co_return current_client;
         }) {
     }
 
@@ -245,13 +282,17 @@ struct vector_store_client::impl {
 
             // Do not refresh the service address too often
             auto now = lowres_clock::now();
-            if (now - last_dns_refresh > dns_refresh_interval) {
+            auto current_duration = now - last_dns_refresh;
+            if (current_duration > dns_refresh_interval) {
                 last_dns_refresh = now;
                 co_await refresh_addr();
             } else {
                 // Wait till the end of the refreshing interval
-                co_await wait_for_signal(refresh_stop_cv, last_dns_refresh + dns_refresh_interval);
-                continue;
+                if (co_await wait_for_timeout(dns_refresh_interval - current_duration, abort_refresh)) {
+                    continue;
+                }
+                // If the wait was aborted, we stop refreshing
+                break;
             }
 
             if (stop_refreshing) {
@@ -307,20 +348,28 @@ struct vector_store_client::impl {
         host_name host;                    ///< The host name for the vector-store service.
     };
 
+    using get_client_error = std::variant<aborted, addr_unavailable>;
+
     /// Get the current http client or wait for a new one to be available.
-    auto get_client() -> future<std::expected<get_client_response, addr_unavailable>> {
+    auto get_client(abort_source& as) -> future<std::expected<get_client_response, get_client_error>> {
         if (current_client) {
             co_return get_client_response{.client = current_client, .host = host};
         }
 
-        trigger_dns_refresh();
+        auto current_client = co_await coroutine::as_future(client_producer(as));
 
-        co_await wait_for_signal(refresh_client_cv, lowres_clock::now() + wait_for_client_timeout);
-
-        if (!current_client || stop_refreshing) {
+        if (current_client.failed()) {
+            auto err = current_client.get_exception();
+            if (as.abort_requested()) {
+                co_return std::unexpected{aborted{}};
+            }
+            co_await coroutine::return_exception_ptr(std::move(err));
+        }
+        auto client = co_await std::move(current_client);
+        if (!client) {
             co_return std::unexpected{addr_unavailable{}};
         }
-        co_return get_client_response{.client = current_client, .host = host};
+        co_return get_client_response{.client = client, .host = host};
     }
 
     struct make_request_response {
@@ -405,7 +454,7 @@ auto vector_store_client::stop() -> future<> {
     }
 
     _impl->stop_refreshing = true;
-    _impl->refresh_stop_cv.signal();
+    _impl->abort_refresh.request_abort();
     _impl->refresh_cv.signal();
     co_await _impl->tasks_gate.close();
 }
@@ -495,7 +544,8 @@ auto vector_store_client_tester::resolve_hostname(vector_store_client& vsc) -> f
     if (vsc.is_disabled()) {
         on_internal_error(vslogger, "Cannot check hostname resolving on a disabled vector store client");
     }
-    auto client_host = co_await vsc._impl->get_client();
+    auto as = abort_source{};
+    auto client_host = co_await vsc._impl->get_client(as);
     if (!client_host) {
         co_return std::nullopt;
     }
