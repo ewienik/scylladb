@@ -55,8 +55,8 @@ constexpr auto DNS_REFRESH_INTERVAL = std::chrono::seconds(5);
 /// Timeout for waiting for a new client to be available
 constexpr auto WAIT_FOR_CLIENT_TIMEOUT = std::chrono::seconds(5);
 
-/// Timeout for HTTP requests to the vector store service
-constexpr auto HTTP_REQUEST_TIMEOUT = std::chrono::seconds(5);
+/// How many retries to do for HTTP requests
+constexpr auto HTTP_REQUEST_RETRIES = 3;
 
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 logging::logger vslogger("vector_store_client");
@@ -227,7 +227,7 @@ struct vector_store_client::impl {
     bool stop_refreshing = false;
     milliseconds dns_refresh_interval = DNS_REFRESH_INTERVAL;
     milliseconds wait_for_client_timeout = WAIT_FOR_CLIENT_TIMEOUT;
-    milliseconds http_request_timeout = HTTP_REQUEST_TIMEOUT;
+    unsigned http_request_retries = HTTP_REQUEST_RETRIES;
     std::function<future<std::optional<inet_address>>(sstring const&)> dns_resolver;
     sequential_producer<lw_shared_ptr<http_client>> client_producer;
 
@@ -301,7 +301,6 @@ struct vector_store_client::impl {
 
             // new client is available
             refresh_client_cv.broadcast();
-
 
             co_await cleanup_old_clients();
 
@@ -377,16 +376,20 @@ struct vector_store_client::impl {
         std::vector<temporary_buffer<char>> content; ///< The content of the response.
     };
 
-    using make_request_error = std::variant<addr_unavailable, service_unavailable>;
+    using make_request_error = std::variant<aborted, addr_unavailable, service_unavailable>;
 
-    auto make_request(operation_type method, http_path path, std::optional<json_content> content)
+    auto make_request(operation_type method, http_path path, std::optional<json_content> content, abort_source& as)
             -> future<std::expected<make_request_response, make_request_error>> {
-        auto start_time = lowres_clock::now();
         auto resp = make_request_response{.status = http::reply::status_type::ok, .content = std::vector<temporary_buffer<char>>()};
-        for (;;) {
-            auto client_host = co_await get_client();
+
+        for (auto retries = 0; retries < HTTP_REQUEST_RETRIES; ++retries) {
+            auto client_host = co_await get_client(as);
             if (!client_host) {
-                co_return std::unexpected{client_host.error()};
+                co_return std::unexpected{std::visit(
+                        [](auto&& err) {
+                            return make_request_error{err};
+                        },
+                        client_host.error())};
             }
             auto [client, host] = *std::move(client_host);
 
@@ -395,24 +398,30 @@ struct vector_store_client::impl {
                 req.write_body("json", *content);
             }
 
-            auto exception_txt = sstring{};
-            try {
-                co_await client->make_request(std::move(req), [&resp](http::reply const& reply, input_stream<char> body) -> future<> {
-                    resp.status = reply._status;
-                    resp.content = co_await util::read_entire_stream(body);
-                });
-                break;
-            } catch (const std::system_error& e) {
-                exception_txt = e.what();
+            auto result = co_await coroutine::as_future(client->make_request(
+                    std::move(req),
+                    [&resp](http::reply const& reply, input_stream<char> body) -> future<> {
+                        resp.status = reply._status;
+                        resp.content = co_await util::read_entire_stream(body);
+                    },
+                    std::nullopt, &as));
+            if (result.failed()) {
+                auto err = result.get_exception();
+                if (as.abort_requested()) {
+                    co_return std::unexpected{aborted{}};
+                }
+                if (try_catch<std::system_error>(err) == nullptr) {
+                    co_await coroutine::return_exception_ptr(std::move(err));
+                }
+                // std::system_error means that the server is unavailable, so we retry
+            } else {
+                co_return resp;
             }
 
             trigger_dns_refresh();
-
-            if (lowres_clock::now() - start_time > http_request_timeout) {
-                co_return std::unexpected{service_unavailable{}};
-            }
         }
-        co_return resp;
+
+        co_return std::unexpected{service_unavailable{}};
     }
 };
 
@@ -473,7 +482,7 @@ auto vector_store_client::port() const -> std::expected<port_number, disabled> {
     return {_impl->port};
 }
 
-auto vector_store_client::ann(keyspace_name keyspace, index_name name, schema_ptr schema, embedding embedding, limit limit, time_point deadline)
+auto vector_store_client::ann(keyspace_name keyspace, index_name name, schema_ptr schema, embedding embedding, limit limit, abort_source& as)
         -> future<std::expected<primary_keys, ann_error>> {
     if (is_disabled()) {
         vslogger.error("Disabled Vector Store while calling ann");
@@ -483,10 +492,10 @@ auto vector_store_client::ann(keyspace_name keyspace, index_name name, schema_pt
     auto path = format("/api/v1/indexes/{}/{}/ann", keyspace, name);
     auto content = write_ann_json(std::move(embedding), limit);
 
-    auto resp = co_await _impl->make_request(operation_type::POST, std::move(path), std::move(content));
+    auto resp = co_await _impl->make_request(operation_type::POST, std::move(path), std::move(content), as);
     if (!resp) {
         co_return std::unexpected{std::visit(
-                [](auto&& err) -> ann_error {
+                [](auto&& err) {
                     return ann_error{err};
                 },
                 resp.error())};
@@ -519,11 +528,11 @@ void vector_store_client_tester::set_wait_for_client_timeout(vector_store_client
     vsc._impl->wait_for_client_timeout = timeout;
 }
 
-void vector_store_client_tester::set_http_request_timeout(vector_store_client& vsc, std::chrono::milliseconds timeout) {
+void vector_store_client_tester::set_http_request_retries(vector_store_client& vsc, unsigned retries) {
     if (vsc.is_disabled()) {
-        on_internal_error(vslogger, "Cannot set http_request_timeout on a disabled vector store client");
+        on_internal_error(vslogger, "Cannot set http_request_retries on a disabled vector store client");
     }
-    vsc._impl->http_request_timeout = timeout;
+    vsc._impl->http_request_retries = retries;
 }
 
 void vector_store_client_tester::set_dns_resolver(vector_store_client& vsc, std::function<future<std::optional<inet_address>>(sstring const&)> resolver) {
