@@ -1,0 +1,2 @@
+VECTOR_STORE_GIT=https://github.com/ewienik/vector-store.git
+VECTOR_STORE_REV=9bb192f7c0860ae4a42d1f566a8ea8ebd8a144d7

@@ -1,0 +1,42 @@
+#!/bin/bash
+
+set -e
+
+usage() {
+    echo "usage: $0 <scylla-bin-path> <build-dir>"
+    exit 1
+}
+
+scylla=$1
+[[ -x $scylla ]] || usage
+
+build_dir=$2
+[[ -d $build_dir ]] || usage
+
+vector_store=$build_dir/vector-search-validator/bin/vector-store
+[[ -x $vector_store ]] || (echo "vector-store binary not found" ; exit 1)
+
+validator=$build_dir/vector-search-validator/bin/vector-search-validator
+[[ -x $validator ]] || (echo "vector-search-validator binary not found" ; exit 1)
+
+shift 2
+
+dns_ip=127.0.1.1
+base_ip=127.0.2
+
+tmp_resolv_conf=$(mktemp /tmp/resolv.conf.XXXXXX)
+echo "nameserver $dns_ip" > $tmp_resolv_conf
+
+sudo unshare -n -m /bin/bash <<EOF
+mount --bind $tmp_resolv_conf /etc/resolv.conf
+ip link set lo up
+ip addr add $dns_ip/32 dev lo
+for i in {1..10}; do
+    ip addr add $base_ip.\$i/32 dev lo
+done
+cat /etc/resolv.conf
+$validator --dns-ip $dns_ip --base-ip $base_ip.1 $scylla $vector_store $@
+EOF
+
+rm $tmp_resolv_conf
+
